@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="0.1.0"
+
+err() { echo "dothis: $*" >&2; }
+die() { err "$@"; exit 1; }
+
+usage() {
+  cat <<'EOF'
+dothis - git worktree workspace launcher
+
+Usage:
+  dothis <branch> [open-flag]      create/reuse worktree for <branch>, then open it
+  dothis --list                    list worktrees of current repo
+  dothis --rm <branch> [--force]   remove worktree for <branch>
+
+Open flags (default: $DOTHIS_OPEN, falls back to shell):
+  --shell       cd into the worktree (default; needs dothis.zsh sourced)
+  --claudecode  launch claude code inside the worktree
+  --codex       launch codex inside the worktree
+  --code        open worktree in VS Code
+  --cursor      open worktree in Cursor
+
+Examples:
+  dothis page-order                # branch page-order, shell lands in worktree
+  dothis page-sales --claudecode   # branch page-sales, opens claude code there
+  dothis --rm page-order           # remove its worktree (branch kept)
+EOF
+}
+
+branch=""
+mode=""
+action="open"
+force=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    -V|--version) echo "dothis $VERSION"; exit 0 ;;
+    --list) action="list" ;;
+    --rm) action="rm" ;;
+    --force) force=1 ;;
+    --shell|--cd) mode="shell" ;;
+    --claudecode|--codex|--code|--cursor) mode="${1#--}" ;;
+    -*) die "unknown flag: $1 (see dothis --help)" ;;
+    *)
+      [[ -n "$branch" ]] && die "unexpected argument: $1"
+      branch="$1"
+      ;;
+  esac
+  shift
+done
+
+git rev-parse --git-dir >/dev/null 2>&1 || die "not inside a git repository"
+
+# Main worktree is always the first entry, even when run from another worktree
+main_root="$(git worktree list --porcelain | head -1 | cut -d' ' -f2-)"
+repo_name="$(basename "$main_root")"
+wt_base="$(dirname "$main_root")/${repo_name}-worktrees"
+
+if [[ "$action" == "list" ]]; then
+  exec git worktree list
+fi
+
+[[ -n "$branch" ]] || { usage >&2; exit 1; }
+
+dir_name="${branch//\//-}"   # branch name verbatim; only the folder name is sanitized
+wt_path="$wt_base/$dir_name"
+
+# Path of the worktree that already has this branch checked out, if any
+branch_worktree() {
+  git worktree list --porcelain | awk -v b="refs/heads/$branch" '
+    $1 == "worktree" { p = substr($0, 10) }
+    $1 == "branch" && $2 == b { print p; exit }
+  '
+}
+
+if [[ "$action" == "rm" ]]; then
+  target="$wt_path"
+  [[ -d "$target" ]] || target="$(branch_worktree)"
+  [[ -n "$target" && -d "$target" ]] || die "no worktree found for branch '$branch'"
+  if (( force )); then
+    git worktree remove --force "$target"
+  else
+    git worktree remove "$target"
+  fi
+  err "removed worktree: $target"
+  err "branch '$branch' kept; delete with: git branch -d $branch"
+  exit 0
+fi
+
+if [[ -d "$wt_path" ]]; then
+  err "worktree exists, reusing: $wt_path"
+else
+  existing="$(branch_worktree)"
+  if [[ -n "$existing" ]]; then
+    err "branch '$branch' already checked out at: $existing"
+    wt_path="$existing"
+  else
+    mkdir -p "$wt_base"
+    if git show-ref --verify --quiet "refs/heads/$branch"; then
+      git worktree add "$wt_path" "$branch" 1>&2
+    elif git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+      git worktree add "$wt_path" -b "$branch" "origin/$branch" 1>&2
+    else
+      git worktree add "$wt_path" -b "$branch" 1>&2
+    fi
+    err "created worktree: $wt_path (branch: $branch)"
+  fi
+fi
+
+mode="${mode:-${DOTHIS_OPEN:-shell}}"
+case "$mode" in
+  shell|cd)
+    # Path on stdout; the sourced dothis.zsh wrapper cds into it
+    echo "$wt_path"
+    ;;
+  claudecode)
+    command -v claude >/dev/null 2>&1 || die "'claude' not found in PATH"
+    cd "$wt_path"
+    err "launching claude code in $wt_path"
+    exec claude
+    ;;
+  codex)
+    command -v codex >/dev/null 2>&1 || die "'codex' not found in PATH"
+    cd "$wt_path"
+    err "launching codex in $wt_path"
+    exec codex
+    ;;
+  code|cursor)
+    command -v "$mode" >/dev/null 2>&1 || die "'$mode' not found in PATH"
+    "$mode" "$wt_path"
+    err "opened $wt_path in $mode"
+    ;;
+  *)
+    die "unknown open mode: $mode (valid: shell, claudecode, codex, code, cursor)"
+    ;;
+esac
