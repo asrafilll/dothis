@@ -42,7 +42,8 @@ while [[ $# -gt 0 ]]; do
     --rm) action="rm" ;;
     --force) force=1 ;;
     --shell|--cd) mode="shell" ;;
-    --claudecode|--codex|--code|--cursor) mode="${1#--}" ;;
+    --claude|--claudecode) mode="claudecode" ;;
+    --codex|--code|--cursor) mode="${1#--}" ;;
     -*) die "unknown flag: $1 (see dothis --help)" ;;
     *)
       [[ -n "$branch" ]] && die "unexpected argument: $1"
@@ -104,7 +105,26 @@ else
     elif git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
       git worktree add "$wt_path" -b "$branch" "origin/$branch" 1>&2
     else
-      git worktree add "$wt_path" -b "$branch" 1>&2
+      # New branch: base it on origin's default branch, not current HEAD
+      base=""
+      if git remote get-url origin >/dev/null 2>&1; then
+        default_branch="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+        default_branch="${default_branch#origin/}"
+        default_branch="${default_branch:-main}"
+        git fetch --quiet origin "$default_branch" 1>&2 || err "warning: fetch of origin/$default_branch failed; using local ref"
+        if git show-ref --verify --quiet "refs/remotes/origin/$default_branch"; then
+          base="origin/$default_branch"
+        fi
+      fi
+      if [[ -n "$base" ]]; then
+        err "basing new branch on $base"
+        git worktree add --no-track "$wt_path" -b "$branch" "$base" 1>&2
+        err "pushing $branch to origin (sets upstream)"
+        git -C "$wt_path" push --quiet -u origin "$branch" 1>&2 \
+          || err "warning: push failed; run later: git push -u origin $branch"
+      else
+        git worktree add "$wt_path" -b "$branch" 1>&2
+      fi
     fi
     err "created worktree: $wt_path (branch: $branch)"
   fi
